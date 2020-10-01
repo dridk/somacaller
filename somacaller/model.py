@@ -170,6 +170,7 @@ class SomaModel(object):
     def __init__(self, hotspot_file:str, reference_file:str):
         self.hotspot_file = os.path.abspath(hotspot_file)
         self.reference_file = os.path.abspath(reference_file)
+        self.bam_files = []
 
         #  Compute hotspot df 
         self.hotspot = pd.read_csv( self.hotspot_file, sep="\t", header=None)
@@ -184,12 +185,18 @@ class SomaModel(object):
 
     def fit(self, bamlist, threads = 15):
 
+        self.bam_files = bamlist
 
         # Compute new slop bed 
-        slop_bedfile = slop_bedfile(self.hotspot_file, 5)
+        bed_file = slop_bedfile(self.hotspot_file, 5)
 
         # Execute thread map/reduce
-        self.raw_data = async_bam_read_counts(bamlist, reference_file = self.reference_file, bed_file = slop_bedfile, threads = threads)
+        logging.info("reads bam depths")
+
+        self.raw_data = async_bam_read_counts(bamlist, reference_file = self.reference_file, bed_file = bed_file, threads = threads)
+
+        logging.info("create models")
+        self._create_models()
 
 
     def _create_models(self):
@@ -245,7 +252,10 @@ class SomaModel(object):
 
     def to_hdf(self, filename):
         self.raw_data.to_hdf(filename, key='raw_data', mode='w')
+
         #self.hotspot_data.to_hdf(filename, key="hotspot_data", mode="a")
+
+        pd.Series(self.bam_files).to_hdf(filename, key="bam_files", mode="a")
 
         parameters = pd.Series({
             "reference_file": self.reference_file,
@@ -254,6 +264,14 @@ class SomaModel(object):
         
         parameters.to_hdf(filename, key='parameters', mode='a')
 
+    def info(self):
+        
+        return {
+        "hotspot_file": self.hotspot_file,
+        "reference_file" : self.reference_file,
+        "bam_files": self.bam_files
+        }
+
 
     @classmethod
     def from_hdf(cls,filename):
@@ -261,6 +279,8 @@ class SomaModel(object):
         raw_data = pd.read_hdf(filename, 'raw_data')
         #hotspot_data = pd.read_hdf(filename, 'hotspot_data')
         parameters = pd.read_hdf(filename, "parameters")
+
+        self.bam_files = pd.read_hdf(filename,"bam_files")
 
         reference_file = parameters["reference_file"]
         hotspot_file = parameters["hotspot_file"]
@@ -345,7 +365,7 @@ class SomaModel(object):
         return self._create_target(self.raw_data)
 
     def _create_target(self, dataframe):
-        dataframe["id"] = dataframe["chr"] + ":" + dataframe["pos"].astype(str)
+        dataframe["id"] = dataframe["chrom"] + ":" + dataframe["pos"].astype(str)
         target_data = dataframe[dataframe["id"].isin(self.hotspot.index)].copy()
         return target_data.reset_index(drop=True)
        
