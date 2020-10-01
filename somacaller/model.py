@@ -28,19 +28,30 @@ HOTSPOT = "../../hotspot.bed"
 BAMFILE = "../../IonXpress_032_R_2019_05_16_08_36_56_user_OUE-855-2019-05-15_P2_Cancero_ampliseq_318_mnk_Auto_user_OUE-855-2019-05-15_P2_Cancero_ampliseq_318_mnk_254.bam"
 BAMFILE2 = "../../IonXpress_096_R_2019_12_12_14_10_53_user_OUE-968-2019-12-11_P2-S50_Cancero_ampliseq_318_Auto_user_OUE-968-2019-12-11_P2-S50_Cancero_ampliseq_318_377.bam"
 
-def read_bedfile(bed_file):
+def read_bedfile(bed_file: str) -> pd.DataFrame:
+    """Read bed file and the corresponding dataframe 
+    
+    Bedfile must be a tab separated with 4 columns:
+        chr, start, end, gene
 
+    Note: 
+        Start position will be converted to 1-based 
+    
+    Args:
+        bed_file (str): Path to bedfile
+    
+    Returns:
+        pd.DataFrame: A dataframe with 4 columns (chrom,start,end,name)
+    """
     df = pd.read_csv(bed_file, sep="\t", header=None)
 
-    df.columns = ["chr","start", "end", "name"]
+    df.columns = ["chrom","start", "end", "name"]
     df["start"] = df["start"] + 1
-    df["id"] = df["chr"] + ":" + df["start"].astype(str) 
-    
+    df["id"] = df["chrom"] + ":" + df["start"].astype(str) 
     df = df.set_index("id").drop_duplicates()
-
     return df
 
-def slop_bed(bed_file:str, slop = 5):
+def slop_bedfile(bed_file:str, slop = 5) -> str:
     """Slop a bedfile from right and left 
     
     Args:
@@ -48,7 +59,7 @@ def slop_bed(bed_file:str, slop = 5):
         slop (int, optional): slop , by default 30
     
     Returns:
-        TYPE: return a new bedfile 
+        str: return a new bedfile path
     """
     large_bedfile = tempfile.mkstemp(suffix = ".bed")[1]
     with open(bed_file) as file_in, open(large_bedfile,"w") as file_out :
@@ -66,7 +77,7 @@ def slop_bed(bed_file:str, slop = 5):
     return large_bedfile
 
 
-def bam_read_count(bamfile:str, reference_file: str, bed_file:str):
+def bam_read_count(bamfile:str, reference_file: str, bed_file:str) -> pd.DataFrame:
     """Call bam-readcount and return a data frame 
     
     Args:
@@ -92,14 +103,14 @@ def bam_read_count(bamfile:str, reference_file: str, bed_file:str):
     try:
         data = StringIO(data)
         df = pd.read_csv(data,sep="\t", header=None)
-        df.columns = ["chr","pos","ref","depth","A","C","G","T"]
+        df.columns = ["chrom","pos","ref","depth","A","C","G","T"]
 
     except:
         print("something is wrong with", bamfile)
-        df = pd.DataFrame({"chr":[], "pos":[],"ref":[], "depth":[], "A":[],"C":[],"G":[],"T":[]}) 
+        df = pd.DataFrame({"chrom":[], "pos":[],"ref":[], "depth":[], "A":[],"C":[],"G":[],"T":[]}) 
     
     # Set ids 
-    df["id"] = df["chr"] +":"+ df["pos"].astype(str)
+    df["id"] = df["chrom"] +":"+ df["pos"].astype(str)
     df = df.set_index("id")
 
     #  Fill uncalled variant from bedfile 
@@ -111,8 +122,11 @@ def bam_read_count(bamfile:str, reference_file: str, bed_file:str):
     final_df["file"] = os.path.basename(bamfile)
     final_df["sample"] = os.path.basename(sample)
 
-    final_df["first_max_depth"] =  final_df.filter(regex="(A|C|G|T)").apply(lambda x: x.drop_duplicates().max(), axis=1)
-    final_df["second_max_depth"] = final_df.filter(regex="(A|C|G|T)").apply(lambda x: x.nlargest(2)[1], axis=1)
+    final_df["first_vaf"] =  final_df.filter(regex="(A|C|G|T)").apply(lambda x: x.drop_duplicates().max(), axis=1)
+    final_df["second_vaf"] = final_df.filter(regex="(A|C|G|T)").apply(lambda x: x.nlargest(2)[1], axis=1)
+
+    final_df["first"]  = final_df.apply(lambda s: s[["A","C","G","T"]].astype(int).nlargest(2).index[0], axis=1)
+    final_df["second"] = final_df.apply(lambda s: s[["A","C","G","T"]].astype(int).nlargest(2).index[1], axis=1)
 
     final_df = final_df.rename({"start":"pos"}, axis=1)
 
@@ -172,7 +186,7 @@ class SomaModel(object):
 
 
         # Compute new slop bed 
-        slop_bedfile = slop_bed(self.hotspot_file, 5)
+        slop_bedfile = slop_bedfile(self.hotspot_file, 5)
 
         # Execute thread map/reduce
         self.raw_data = async_bam_read_counts(bamlist, reference_file = self.reference_file, bed_file = slop_bedfile, threads = threads)
@@ -186,7 +200,7 @@ class SomaModel(object):
             #chrom, pos = index.split(":")
             logging.info(f"create linear model: {index}")
             # subset df selection 
-            df = target_data[target_data["id"] == index][["depth", "second_max_depth"]]
+            df = target_data[target_data["id"] == index][["depth", "second_vaf"]]
             df.columns = ["x","y"]
             
             # Linear regression
@@ -210,12 +224,12 @@ class SomaModel(object):
 
         line = pd.DataFrame({"x":x.reshape(-1), "y":y.reshape(-1)})
 
-        c1 = alt.Chart(data).mark_point().encode(x="depth", y="second_max_depth", tooltip = ["file","sample"])
+        c1 = alt.Chart(data).mark_point().encode(x="depth", y="second_vaf", tooltip = ["file","sample"])
         c2 = alt.Chart(line).mark_line().encode(x="x",y="y")
 
         return c1 + c2
 
-        # sns.scatterplot(x="depth", y="second_max_depth", data=data)
+        # sns.scatterplot(x="depth", y="second_vaf", data=data)
 
         # plt.savefig(filename)
 
@@ -224,7 +238,7 @@ class SomaModel(object):
             # data = hotspot.query("id == 'chr12:25398280'")
 
             # X = data["depth"].values.reshape(-1,1)
-            # Y = data["second_max_depth"].values
+            # Y = data["second_vaf"].values
 
 
 
@@ -262,11 +276,11 @@ class SomaModel(object):
         target_df = self._create_target(df)
         target_df = target_df[target_df["depth"] > 10].copy()
 
-        target_df["af"] = target_df["second_max_depth"] / target_df["depth"] * 100
+        target_df["af"] = target_df["second_vaf"] / target_df["depth"] * 100
 
         # Compute regression score 
-        target_df["z_linear"] = target_df.apply(lambda s : self._predict_regression_score(s["depth"], s["second_max_depth"], s["id"]), axis=1)
-        target_df["outlier"] = target_df.apply(lambda s : self._predict_outlier_score(s["depth"], s["second_max_depth"], s["id"]), axis=1)
+        target_df["z_linear"] = target_df.apply(lambda s : self._predict_regression_score(s["depth"], s["second_vaf"], s["id"]), axis=1)
+        target_df["outlier"] = target_df.apply(lambda s : self._predict_outlier_score(s["depth"], s["second_vaf"], s["id"]), axis=1)
 
 
         # Compute outliers 
@@ -279,7 +293,7 @@ class SomaModel(object):
         #df = sample_df.query(f"id == '{position}'")
         all_df = self.target_data().query(f"id == '{position}'")
         
-        std = all_df["second_max_depth"].std()
+        std = all_df["second_vaf"].std()
 
         x = np.array([x]).reshape(-1,1)
         y_pred = self.linear_models[position].predict(x).reshape(-1)[0]
@@ -310,7 +324,7 @@ class SomaModel(object):
         # index = f"{chrom}:{pos}"
 
 
-        # data = self.hotspot_data.loc[index][["depth", "second_max_depth"]]
+        # data = self.hotspot_data.loc[index][["depth", "second_vaf"]]
         # data = pd.DataFrame(MinMaxScaler().fit_transform(data))
         # data.columns = ["x","y"]
 
