@@ -18,7 +18,8 @@ from scipy import stats
 import altair as alt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.linear_model import BayesianRidge, HuberRegressor, LinearRegression
-from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors, KNeighborsRegressor
+from sklearn.ensemble import IsolationForest
+
 from sklearn.pipeline import make_pipeline
 
 import matplotlib.pyplot as plt
@@ -178,10 +179,6 @@ def async_bam_read_counts(bamfiles: list, reference_file: str, bed_file, threads
 
 
 
-
-
-
-
 class SomaModel(object):
 
     def __init__(self, hotspot_file:str, reference_file:str):
@@ -239,27 +236,43 @@ class SomaModel(object):
             self.linear_models[index] = lr
 
             #Outlier model 
-            clf = make_pipeline(MinMaxScaler(), NearestNeighbors(10))
+            #clf = make_pipeline(MinMaxScaler(), NearestNeighbors(10))
+            clf = IsolationForest()
             clf.fit(df)
             self.outlier_models[index] = clf
 
-    def plot(self,position:str):
+    def plot(self,position:str, test_df = None):
         
-        data = self.target_data().query(f"id == '{position}'")
+        data = self.target_data().copy()
+
+        data["test"] = False
+
+        if test_df is not None:
+            test_df["test"] = True
+            data = pd.concat([data, test_df]).reset_index()
+
+        data = data.query(f"id == '{position}'").copy()
 
         x = np.arange(data["depth"].min(), data["depth"].max(), 1000).reshape(-1,1)
         y = self.linear_models[position].predict(x)
-        y_seuil = x * 0.01
+        y_seuil = x * 0.005
 
         line = pd.DataFrame({"x":x.reshape(-1), "y":y.reshape(-1)})
         line2 = pd.DataFrame({"x":x.reshape(-1), "y":y_seuil.reshape(-1)})
         
         data["fraction"] = data["second_vaf"] / data["depth"] * 100
-        data["s"] = data["sample"].str.replace(r"-\d","")
+        data["s"] = data["sample"].str.replace(r"-\d","", regex=True)
+        data["outlier"] = self.outlier_models[position].predict(data[["depth","second_vaf"]])
         
-        c1 = alt.Chart(data).mark_point().encode(x="depth", y="second_vaf",tooltip = ["file","sample","depth","fraction"])
-        c2 = alt.Chart(line).mark_line(color="green").encode(x="x",y="y")
-        c3 = alt.Chart(line2).mark_line(color="red").encode(x="x",y="y")
+        c1 = alt.Chart(data).mark_circle(color="green").encode(
+            x="depth",
+            y="second_vaf",
+            size=alt.Size("test", scale = alt.Scale(type = "ordinal", range=[50, 400])),
+            color=alt.Color("test", scale = alt.Scale(range=["gray","green"])),
+            tooltip = ["file","sample","depth","fraction", "outlier"])
+
+        c2 = alt.Chart(line).mark_line(color="green",strokeDash=[1,3]).encode(x="x",y="y")
+        c3 = alt.Chart(line2).mark_line(color="red", strokeDash=[1,3]).encode(x="x",y="y")
 
 
         return (c1 + c2 + c3).interactive()
@@ -322,8 +335,7 @@ class SomaModel(object):
 
     def test(self, bamfile):
 
-        self._create_models()
-             # Compute new slop bed 
+         # Compute new slop bed 
         bed_file = slop_bedfile(self.hotspot_file, self.slop)
         df = bam_read_count(bamfile, self.reference_file, bed_file)
         target_df = self._create_target(df)
@@ -361,13 +373,9 @@ class SomaModel(object):
         #df = sample_df.query(f"id == '{position}'")
         
         df = pd.DataFrame({"x":[x], "y":[y]})
-        df = self.outlier_models[position]["minmaxscaler"].transform(df)
-    
-        distance, indices = self.outlier_models[position]["nearestneighbors"].kneighbors(df)
+        score  = self.outlier_models[position].decision_function(df)
 
-        mean_distance = np.mean(distance[:,1:], axis=1)[0]
-
-        return mean_distance
+        return score[0]
         #return self.outlier_models[position].fit(df, novelty=True)[0]
 
         

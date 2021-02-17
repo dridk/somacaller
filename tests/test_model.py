@@ -9,7 +9,7 @@ import pytest
 BED_FILE = "examples/hotspot.bed" 
 BAM_FILE = "examples/tpos.bam"
 
-HG19_FILE = os.environ["HG19"]  
+HG19_FILE = os.environ["HG19"]
 
 
 

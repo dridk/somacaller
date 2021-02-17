@@ -1,5 +1,6 @@
 import argparse
 import sys
+import pandas as pd
 from somacaller.model import SomaModel
 
 class VafyParser(object):
@@ -10,7 +11,7 @@ class VafyParser(object):
             usage="""vafy <command> [<args>] 
 subcommand are : 
     fit               learn model from a bam list
-    test           compute prediction score from a bam file 
+    test              compute prediction score from a bam file 
     plot              plot model and prediction
 
             """,
@@ -62,11 +63,13 @@ subcommand are :
         parser = argparse.ArgumentParser(description="test bam")
         parser.add_argument('-p', '--position', help="ex: chr3:23424", required=True)
         parser.add_argument('-m', '--model', help="ex: model.h5", required=True)
+        parser.add_argument('-r', '--result', help="ex: result.txt", required=True)
         parser.add_argument('-o', '--output', help="ex: graph.json", required=True)
         args = parser.parse_args(argv)   
 
         model = SomaModel.from_hdf(args.model)
-        chart = model.plot(args.position)
+        result = pd.read_csv(args.result)
+        chart = model.plot(args.position, result)
 
         chart.save(args.output)
 
