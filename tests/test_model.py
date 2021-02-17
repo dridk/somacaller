@@ -78,20 +78,13 @@ def test_bam_read_count():
 
     print(df)
 
-    # chr7   55241707    EGFR  1776.0   328.0     0.0  1448.0     0.0  tpos.bam  SM:T POS ATC           1448.0             328.0
+
+def test_entropy():
+
+    assert entropy(pd.Series([0.25, 0.25, 0.25, 0.25])) == 2
+    assert entropy(pd.Series([1, 0, 0, 0])) == 0
 
 
-# def test_async_bam_read_count():
-#     assert "HG19" in os.environ, "please set $HG19 global environement variable with hg19.fa path"
-#     assert os.path.exists(BAM_FILE)
-#     HG19_FILE = os.environ["HG19"]  
-#     bed_df = read_bedfile(BED_FILE)
-
-#     first_bam = BAM_FILE
-#     second_bam = tempfile.mkstemp(suffix = ".bam")[1]
-#     df = async_bam_read_counts(create_bam_files(), HG19_FILE, BED_FILE, threads=4)
-
-#     assert len(df) == len(files) * len(bed_df)
 
 
 def test_serialization(model):

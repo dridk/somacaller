@@ -17,16 +17,20 @@ from scipy import stats
 
 import altair as alt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.linear_model import BayesianRidge
+from sklearn.linear_model import BayesianRidge, HuberRegressor, LinearRegression
 from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors, KNeighborsRegressor
 from sklearn.pipeline import make_pipeline
 
 import matplotlib.pyplot as plt
 
+# BINARY 
+BAMREADCOUNT = "/rawdata/miniconda3/bin/bam-readcount"
+SAMTOOLS = "/rawdata/miniconda3/bin/samtools"
+
 HG19 =  "/mnt/R60/bioinformatique/hg19/hg19.fasta"
-HOTSPOT = "../../hotspot.bed"
-BAMFILE = "../../IonXpress_032_R_2019_05_16_08_36_56_user_OUE-855-2019-05-15_P2_Cancero_ampliseq_318_mnk_Auto_user_OUE-855-2019-05-15_P2_Cancero_ampliseq_318_mnk_254.bam"
-BAMFILE2 = "../../IonXpress_096_R_2019_12_12_14_10_53_user_OUE-968-2019-12-11_P2-S50_Cancero_ampliseq_318_Auto_user_OUE-968-2019-12-11_P2-S50_Cancero_ampliseq_318_377.bam"
+HOTSPOT = "/home/sacha/Dev/somacaller/somacaller/hotspot.bed"
+#BAMFILE = "../../IonXpress_032_R_2019_05_16_08_36_56_user_OUE-855-2019-05-15_P2_Cancero_ampliseq_318_mnk_Auto_user_OUE-855-2019-05-15_P2_Cancero_ampliseq_318_mnk_254.bam"
+#BAMFILE2 = "../../IonXpress_096_R_2019_12_12_14_10_53_user_OUE-968-2019-12-11_P2-S50_Cancero_ampliseq_318_Auto_user_OUE-968-2019-12-11_P2-S50_Cancero_ampliseq_318_377.bam"
 
 def read_bedfile(bed_file: str) -> pd.DataFrame:
     """Read bed file and the corresponding dataframe 
@@ -75,6 +79,12 @@ def slop_bedfile(bed_file:str, slop = 5) -> str:
                 writer.writerow(new_line)
 
     return large_bedfile
+   
+def entropy(s : pd.Series):
+    s = s + 1
+    total = s.sum()
+    p = s/total
+    return - (np.log2(p) * p).sum()
 
 
 def bam_read_count(bamfile:str, reference_file: str, bed_file:str) -> pd.DataFrame:
@@ -92,7 +102,7 @@ def bam_read_count(bamfile:str, reference_file: str, bed_file:str) -> pd.DataFra
     # Run bam-readcount
  
     logging.debug("process bamfile: " + bamfile)
-    cmd = f"samtools view -H {bamfile}|grep -oE \"SM:.+\""
+    cmd = f"samtools view -H {bamfile}|grep -oE \"SM:.+\"|uniq"
    
     sample = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode('utf-8').strip()
     logging.debug("process sample: " + sample)
@@ -110,8 +120,9 @@ def bam_read_count(bamfile:str, reference_file: str, bed_file:str) -> pd.DataFra
         df = pd.DataFrame({"chrom":[], "pos":[],"ref":[], "depth":[], "A":[],"C":[],"G":[],"T":[]}) 
     
     # Set ids 
-    df["id"] = df["chrom"] +":"+ df["pos"].astype(str)
-    df = df.set_index("id")
+    df["index"] = df["chrom"] +":"+ df["pos"].astype(str)
+
+    df = df.set_index("index")
 
     #  Fill uncalled variant from bedfile 
     bed_df = read_bedfile(bed_file).copy()
@@ -128,9 +139,15 @@ def bam_read_count(bamfile:str, reference_file: str, bed_file:str) -> pd.DataFra
     final_df["first"]  = final_df.apply(lambda s: s[["A","C","G","T"]].astype(int).nlargest(2).index[0], axis=1)
     final_df["second"] = final_df.apply(lambda s: s[["A","C","G","T"]].astype(int).nlargest(2).index[1], axis=1)
 
-    final_df = final_df.rename({"start":"pos"}, axis=1)
+    # Compute entropy 
+    final_df["entropy"] = final_df.filter(regex="(A|C|G|T)").apply(lambda x: entropy(x.nsmallest(3)), axis=1).abs()
 
-    return final_df.reset_index(drop=True).drop_duplicates()
+
+    final_df = final_df.rename({"start":"pos"}, axis=1)
+    final_df["id"] = final_df["chrom"] +":"+ final_df["pos"].astype(str)
+
+    final_df = final_df.reset_index(drop=True).drop_duplicates()
+    return final_df
 
 
 
@@ -182,18 +199,22 @@ class SomaModel(object):
         self.linear_models = {}
         self.outlier_models = {}
         self.scalers = {}
+        self.slop = 5
+        
+
 
     def fit(self, bamlist, threads = 15):
 
         self.bam_files = bamlist
 
         # Compute new slop bed 
-        bed_file = slop_bedfile(self.hotspot_file, 5)
+        bed_file = slop_bedfile(self.hotspot_file, self.slop)
 
         # Execute thread map/reduce
         logging.info("reads bam depths")
 
         self.raw_data = async_bam_read_counts(bamlist, reference_file = self.reference_file, bed_file = bed_file, threads = threads)
+        self.raw_data["hotspot"] = self.raw_data["id"].isin(self.hotspot.index)
 
         logging.info("create models")
         self._create_models()
@@ -213,7 +234,7 @@ class SomaModel(object):
             # Linear regression
             X = df["x"].values.reshape(-1,1)
             Y = df["y"].values
-            lr =  BayesianRidge()
+            lr =  HuberRegressor()
             lr.fit(X,Y)
             self.linear_models[index] = lr
 
@@ -222,19 +243,26 @@ class SomaModel(object):
             clf.fit(df)
             self.outlier_models[index] = clf
 
-    def plot(self, filename,position):
+    def plot(self,position:str):
         
         data = self.target_data().query(f"id == '{position}'")
 
         x = np.arange(data["depth"].min(), data["depth"].max(), 1000).reshape(-1,1)
         y = self.linear_models[position].predict(x)
+        y_seuil = x * 0.01
 
         line = pd.DataFrame({"x":x.reshape(-1), "y":y.reshape(-1)})
+        line2 = pd.DataFrame({"x":x.reshape(-1), "y":y_seuil.reshape(-1)})
+        
+        data["fraction"] = data["second_vaf"] / data["depth"] * 100
+        data["s"] = data["sample"].str.replace(r"-\d","")
+        
+        c1 = alt.Chart(data).mark_point().encode(x="depth", y="second_vaf",tooltip = ["file","sample","depth","fraction"])
+        c2 = alt.Chart(line).mark_line(color="green").encode(x="x",y="y")
+        c3 = alt.Chart(line2).mark_line(color="red").encode(x="x",y="y")
 
-        c1 = alt.Chart(data).mark_point().encode(x="depth", y="second_vaf", tooltip = ["file","sample"])
-        c2 = alt.Chart(line).mark_line().encode(x="x",y="y")
 
-        return c1 + c2
+        return (c1 + c2 + c3).interactive()
 
         # sns.scatterplot(x="depth", y="second_vaf", data=data)
 
@@ -280,28 +308,36 @@ class SomaModel(object):
         #hotspot_data = pd.read_hdf(filename, 'hotspot_data')
         parameters = pd.read_hdf(filename, "parameters")
 
-        self.bam_files = pd.read_hdf(filename,"bam_files")
+        #self.bam_files = pd.read_hdf(filename,"bam_files")
 
         reference_file = parameters["reference_file"]
         hotspot_file = parameters["hotspot_file"]
 
         model =  SomaModel(hotspot_file, reference_file)   
         model.raw_data = raw_data
+        model._create_models()
         return model
 
 
 
     def test(self, bamfile):
-        df = bam_read_count(bamfile, self.reference_file, self.hotspot_file)
+
+        self._create_models()
+             # Compute new slop bed 
+        bed_file = slop_bedfile(self.hotspot_file, self.slop)
+        df = bam_read_count(bamfile, self.reference_file, bed_file)
         target_df = self._create_target(df)
-        target_df = target_df[target_df["depth"] > 10].copy()
+        #target_df = target_df[target_df["depth"] > 10].copy()
+
+       
 
         target_df["af"] = target_df["second_vaf"] / target_df["depth"] * 100
 
-        # Compute regression score 
+        #Compute regression score 
         target_df["z_linear"] = target_df.apply(lambda s : self._predict_regression_score(s["depth"], s["second_vaf"], s["id"]), axis=1)
         target_df["outlier"] = target_df.apply(lambda s : self._predict_outlier_score(s["depth"], s["second_vaf"], s["id"]), axis=1)
 
+        #del target_df["sample"]
 
         # Compute outliers 
 
@@ -384,9 +420,9 @@ if __name__ == '__main__':
 
     model = SomaModel(HOTSPOT, HG19)
 
-    model.fit(glob("../../*.bam"))
+    model.fit(glob("/home/sacha/nas/projects/somatic/ATC/*.bam"))
 
-    model.to_hdf("data.h5")
+    model.to_hdf("data3.h5")
 
 
     # model = SomaModel.from_hdf("data.h5")
